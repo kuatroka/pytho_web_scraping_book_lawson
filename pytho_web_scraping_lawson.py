@@ -1180,4 +1180,192 @@ for name, scraper in scrapers:
 ## Lxml with Xpath...0.97 seconds - winner!!
 
 
+##################################################################
+### Adding a callback fn to the link_crawler to scrape more than one site
+import re
+import urllib.request
+from urllib.parse import urlparse
+import time
+from urllib import robotparser
+from urllib.parse import urljoin
+from urllib.error import URLError, HTTPError, ContentTooShortError
+from lxml.html import fromstring
 
+
+
+#### create a class to delay the visit to the same url 
+
+class Throttle:
+    """ Add a delay between downloads to the same domain
+    """
+    def __init__(self, delay):
+        # amount of delay between downloads for each domain
+        self.delay = delay
+        # timestamp of when a domain was last accessed
+        self.domains = {}
+
+    def wait(self, url):
+        domain = urlparse(url).netloc
+        last_accessed = self.domains.get(domain)
+
+        if self.delay > 0 and last_accessed is not None:
+            sleep_secs = self.delay - (time.time() - last_accessed)
+            if sleep_secs > 0:
+                # domain has been accessed recently
+                # so need to sleep
+                time.sleep(sleep_secs)
+        # update the last accessed time
+        self.domains[domain] = time.time()
+
+#### class over
+
+
+
+from lxml.html import fromstring
+import requests
+
+def download(url, num_retries=2, 
+            user_agent='wswp',
+            proxies=None):
+
+    """ Download a given URL and return the page content
+        args:
+            url (str): URL
+        kwargs:
+            user_agent (str): user agent (default: wswp)
+            proxies (dict): proxy dict w/ keys 'http' and 'https', values
+                            are strs (i.e. 'http(s)://IP') (default: None)
+            num_retries (int): # of retries if a 5xx error is seen (default: 2)
+    """
+    print('Downloading:', url)
+    headers = {'User-Agent': user_agent, }
+    try:
+        resp = requests.get(url, headers=headers, proxies=proxies)
+        html = resp.text
+        if resp.status_code >= 400:
+            print('Download error:', resp.text)
+            html = None
+            if num_retries and 500 <= resp.status_code < 600:
+                return download(url, num_retries-1)
+
+    except requests.exceptions.RequestException as e:
+        print('Download error:', e.reason)
+        html = None
+
+    return html
+
+
+
+def get_robots_parser(robots_url):
+    " Return the robots parser object using the robots_url "
+    rp = robotparser.RobotFileParser()
+    rp.set_url(robots_url)
+    rp.read()
+    return rp
+
+
+def get_links(html):
+    " Return a list of links (using simple regex matching) from the html content "
+    # a regular expression to extract all links from the webpage
+    webpage_regex = re.compile("""<a[^>]+href=["'](.*?)["']""", re.IGNORECASE)
+    # list of all links from the webpage
+    return webpage_regex.findall(html)
+
+
+def link_crawler(start_url, link_regex,
+                robots_url=None,
+                user_agent='wswp',
+                proxies=None,
+                delay=3,
+                max_depth=4,
+                scrape_callback=None):
+    crawl_queue = [start_url]
+    seen =  {}
+    data = []
+    if not robots_url:
+        robots_url = start_url+'/robots.txt'
+    rp = get_robots_parser(robots_url)
+    throttle = Throttle(delay)
+
+    # we add throttle here, but I'm not sure yet why
+    
+    while crawl_queue:
+        url = crawl_queue.pop()
+        # check url pases robots.txt restrictions
+        if rp.can_fetch(user_agent, url):
+            depth = seen.get(url,0)
+            if depth == max_depth:
+                print(f'Skipping url... {url} due to depth')
+                continue
+
+            throttle.wait(url)
+
+            html = download(url, user_agent=user_agent, proxies=proxies)
+            if not html:
+                continue
+            if scrape_callback:
+                data.extend(scrape_callback(url, html) or [])
+            # filler for links matching our regex
+            for link in get_links(html):
+                if re.match(link_regex, link):
+                    abs_link = urljoin(start_url, link)
+                    if abs_link not in seen:
+                        seen[abs_link] = depth + 1
+                        crawl_queue.append(abs_link)
+            
+            
+            if not html:
+                continue
+            # TODO: add actual data scraping here
+
+        else:
+            print('Blocked by robots.txt...', url)
+
+
+def scrape_callback(url, html): # a fn that will be passed to the main link_crawl fn to scrape data if certain conditions are met
+    """ Scrape each row from the country data using XPath and lxml """
+
+    FIELDS = ('area', 'population', 'iso', 'country', 'capital', 'continent',
+              'tld', 'currency_code', 'currency_name', 'phone', 'postal_code_format',
+              'postal_code_regex', 'languages', 'neighbours')
+    
+    if re.search('/view/', url):
+        tree = fromstring(html)
+        all_rows = [tree.xpath(f'//tr[@id="places_{field}__row"]/td[@class="w2p_fw"]')[0].text_content() and print(field) for field in FIELDS]
+        print(url, all_rows)
+
+
+#####
+link_crawler('http://example.webscraping.com/places/default/view/Albania-3', '/(index|view)', max_depth=-1, scrape_callback=scrape_callback)
+# if I put max_depth more or less then 1 when re.search and link_regex /places/ it gives an IndexError: list index out of range 
+link_crawler('http://example.webscraping.com/places/default/view/Albania-3', '/view/', max_depth=-1, scrape_callback=scrape_callback)
+
+
+########## adding a class that will write data to csv
+
+import csv
+import re
+from lxml.html import fromstring
+
+
+class CsvCallback:
+    def __init__(self):
+        self.writer = csv.writer(open('./data/countries.csv', 'w')) # '../data/countries.csv' if I want it to be in a data folder in the same forlder as parent for the code folder 
+        self.fields = ('area', 'population', 'iso', 'country', 'capital',
+                       'continent', 'tld', 'currency_code', 'currency_name',
+                       'phone', 'postal_code_format', 'postal_code_regex',
+                       'languages', 'neighbours')
+        self.writer.writerow(self.fields)
+
+    def __call__(self, url, html):
+        if re.search('/view/', url):
+            tree = fromstring(html)
+            all_rows = [
+                tree.xpath(f'//tr[@id="places_{field}__row"]/td[@class="w2p_fw"]')[0].text_content() for field in self.fields]
+
+            self.writer.writerow(all_rows)
+
+link_crawler('http://example.webscraping.com/places/default/view/United-Kingdom-239', '/(index|view)',max_depth=1, scrape_callback=CsvCallback())
+## be careful with parameters for link_regex and regex in re.search as if they are not correct and do not correspond to the 
+## real data on the page, it will give index our range error or something else
+# CsvCallback().writer.close() 
