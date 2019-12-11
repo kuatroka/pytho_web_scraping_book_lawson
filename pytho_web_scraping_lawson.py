@@ -1380,15 +1380,16 @@ from random import choice
 import requests
 
 class Downloader:
-        """ Downloader class to use cache and requests for downloading pages.
+
+    """ Downloader class to use cache and requests for downloading pages.
         For contructor, pass:
-            delay (int): # of secs delay between requests (default: 5)
-            user_agent (str): user agent string (default: 'wswp')
-            proxies (list[dict]): list of possible proxies, each
-                must be a dict with http / https keys and proxy values
-            cache (dict or dict-like obj): keys: urls, values: dicts with keys (html, code)
-            timeout (float/int): number of seconds to wait until timeout
-        """
+        delay (int): # of secs delay between requests (default: 5)
+        user_agent (str): user agent string (default: 'wswp')
+        proxies (list[dict]): list of possible proxies, each
+            must be a dict with http / https keys and proxy values
+        cache (dict or dict-like obj): keys: urls, values: dicts with keys (html, code)
+        timeout (float/int): number of seconds to wait until timeout
+    """
 
     def __init__(self, delay=5, user_agent='wswp', proxies=None, cache={}):
         self.throttle = Throttle(delay)
@@ -1456,8 +1457,122 @@ class Downloader:
 
         return {'html': html, 'code': resp.status_code}
 
-        
+
+###############
+## we need to create filenames in such a way it doesn't break in our OS and the name can be actually created
+## there will be one file per downloaded page
+
+import re
+url = 'http://example.webscraping.com/default/view/Australia-1/sfsdff/sdfsdfdsf/sdfsdfsdf/sdfsdfsdf/sdfsdfsd/fsdfdsfsd/fsdfvj/ghjghj/ cvbcv/cvbcvb'
+re.sub('[^/0-9a-zA-Z\-.,;_ ]', '_', url)
 
 
-            
+## limit filename to no more than 255 char 
+filename = re.sub('[^/0-9a-zA-Z\-.,;_ ]', '_', url)
+filename = '/'.join(segment[:255] for segment in filename.split('/'))
+
+from urllib.parse import urlsplit
+components = urlsplit('http://example.webscrapling.com/index/')
+print(components)
+print(components.path)
+
+path = components.path
+if not path:
+    path = '/index.html'
+elif path.endswith('/'):
+    path += 'index.html'
+
+filename = components.netloc + path + components.query
+
+"""
+Depending on the site you are scraping, you may want to modify this edge case handling.
+For example, some sites will append / on every URL due to the way the web server expects
+the URL to be sent. For these sites, you might be safe simply stripping the trailing forward
+slash for every URL. Again, evaluate and update the code for your web crawler to best fit
+the site(s) you intend to scrape
+"""
+
+#### implementing DisckCache class
+
+import os
+import re
+import json
+import zlib
+from urllib.parse import urlsplit
+from datetime import datetime, timedelta
+
+class DisckCache:
+    def __init__(self, cache_dir='./data/cache', max_len=255, compress=True,
+                 encoding='utf-8', expires=timedelta(days=30)):
+        self.cache_dir = cache_dir
+        self.max_len = max_len
+        self.compress = compress
+        self.encoding = encoding
+        self.expires = expires
+
+    def url_to_path(self, url):
+        """Return file system path string for given URL"""
+        components = urlsplit(url)
+        path = components.path
+        if not path:
+            path = '/index.html'
+        elif path.endswith('/'):
+            path += 'index.html'
+        filename = components.netloc + path + components.query
+        # replace invalid characters
+        filename = re.sub('[^/0-9a-zA-Z\-.,;_ ]', '_', filename)
+        # restrict maximum number of characters
+        filename = '/'.join(segment[:255] for segment in filename.split('/'))
+        return os.path.join(self.cache_dir, filename)
+
+
+    def __getitem__(self, url):
+        """Load data from disk for given url"""
+        path = self.url_to_path(url)
+        if os.path.exists(path):
+            mode = ('rb' if self.compress else 'r')
+            with open(path, mode) as fp:
+                if self.compress:
+                    data = zlib.decompress(fp.read()).decode(self.encoding)
+                    data = json.loads(data)
+
+                else:
+                    data = json.load(fp)
+            exp_date = data.get('expires')
+            if exp_date and datetime.strptime(exp_date,
+                            '%Y-%m-%dT%H:%M:%S') <= datetime.utcnow():
+                print('Cache expired!', exp_date)
+                raise KeyError(url + 'has expired.')
+            return data
+        else:
+            # URL has not been cached
+            raise KeyError(url + 'does not exist')
+
+
+    def __setitem__(self, url, result):
+        """
+        Save data to disk for given url
+        """
+        path = self.url_to_path(url)
+        folder = os.path.dirname(path)
+        if not os.path.exists(folder):
+            os.makedirs(folder)
+
+        mode = ('wb' if self.compress else 'w')
+        # Note: the timespec command requires Py3.6+ (if using 3.X you can
+        # export using isoformat() and import with '%Y-%m-%dT%H:%M:%S.%f'
+        result['expires'] = (datetime.utcnow() + self.expires).isoformat(timespec='seconds')
+        with open(path, mode) as fp:
+            if self.compress:
+                data = bytes(json.dump(result), self.encoding)
+                fp.write(zlib.compress(data))
+            else:
+                json.dump(result, fp)
+                      
+
+
+
+
+    
+
 
