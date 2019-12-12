@@ -1458,6 +1458,80 @@ class Downloader:
         return {'html': html, 'code': resp.status_code}
 
 
+###################
+### bringing the old link_crawler() here
+
+from urllib import robotparser
+from urllib.parse import urljoin
+
+
+
+def get_robots_parser(robots_url):
+    " Return the robots parser object using the robots_url "
+    rp = robotparser.RobotFileParser()
+    rp.set_url(robots_url)
+    rp.read()
+    return rp
+
+
+def get_links(html):
+    " Return a list of links (using simple regex matching) from the html content "
+    # a regular expression to extract all links from the webpage
+    webpage_regex = re.compile("""<a[^>]+href=["'](.*?)["']""", re.IGNORECASE)
+    # list of all links from the webpage
+    return webpage_regex.findall(html)
+
+def link_crawler(start_url, link_regex,
+                robots_url=None,
+                user_agent='wswp',
+                proxies=None,
+                delay=3,
+                max_depth=4,
+                cache = {},
+                scrape_callback=None):
+    crawl_queue = [start_url]
+    seen =  {}
+    data = []
+    if not robots_url:
+        robots_url = start_url+'/robots.txt'
+    rp = get_robots_parser(robots_url)
+    throttle = Throttle(delay)
+
+    # we add throttle here, but I'm not sure yet why
+    
+    while crawl_queue:
+        url = crawl_queue.pop()
+        # check url pases robots.txt restrictions
+        if rp.can_fetch(user_agent, url):
+            depth = seen.get(url,0)
+            if depth == max_depth:
+                print(f'Skipping url... {url} due to depth')
+                continue
+
+            throttle.wait(url)
+
+            html = download(url, user_agent=user_agent, proxies=proxies)
+            if not html:
+                continue
+            if scrape_callback:
+                data.extend(scrape_callback(url, html) or [])
+            # filler for links matching our regex
+            for link in get_links(html):
+                if re.match(link_regex, link):
+                    abs_link = urljoin(start_url, link)
+                    if abs_link not in seen:
+                        seen[abs_link] = depth + 1
+                        crawl_queue.append(abs_link)
+            
+            
+            if not html:
+                continue
+            # TODO: add actual data scraping here
+
+        else:
+            print('Blocked by robots.txt...', url)
+
+link_crawler('http://example.webscraping.com/places/default/view/United-Kingdom-239', '/(index|view)',max_depth=-1)
 ###############
 ## we need to create filenames in such a way it doesn't break in our OS and the name can be actually created
 ## there will be one file per downloaded page
@@ -1493,86 +1567,13 @@ the site(s) you intend to scrape
 """
 
 #### implementing DisckCache class
+## it's implemented in a different file as a module
 
-import os
-import re
-import json
-import zlib
-from urllib.parse import urlsplit
-from datetime import datetime, timedelta
-
-class DisckCache:
-    def __init__(self, cache_dir='./data/cache', max_len=255, compress=True,
-                 encoding='utf-8', expires=timedelta(days=30)):
-        self.cache_dir = cache_dir
-        self.max_len = max_len
-        self.compress = compress
-        self.encoding = encoding
-        self.expires = expires
-
-    def url_to_path(self, url):
-        """Return file system path string for given URL"""
-        components = urlsplit(url)
-        path = components.path
-        if not path:
-            path = '/index.html'
-        elif path.endswith('/'):
-            path += 'index.html'
-        filename = components.netloc + path + components.query
-        # replace invalid characters
-        filename = re.sub('[^/0-9a-zA-Z\-.,;_ ]', '_', filename)
-        # restrict maximum number of characters
-        filename = '/'.join(segment[:255] for segment in filename.split('/'))
-        return os.path.join(self.cache_dir, filename)
+from diskcache import DiskCache
+from downloader import Downloader
+from advanced_link_crawler import link_crawler
 
 
-    def __getitem__(self, url):
-        """Load data from disk for given url"""
-        path = self.url_to_path(url)
-        if os.path.exists(path):
-            mode = ('rb' if self.compress else 'r')
-            with open(path, mode) as fp:
-                if self.compress:
-                    data = zlib.decompress(fp.read()).decode(self.encoding)
-                    data = json.loads(data)
-
-                else:
-                    data = json.load(fp)
-            exp_date = data.get('expires')
-            if exp_date and datetime.strptime(exp_date,
-                            '%Y-%m-%dT%H:%M:%S') <= datetime.utcnow():
-                print('Cache expired!', exp_date)
-                raise KeyError(url + 'has expired.')
-            return data
-        else:
-            # URL has not been cached
-            raise KeyError(url + 'does not exist')
-
-
-    def __setitem__(self, url, result):
-        """
-        Save data to disk for given url
-        """
-        path = self.url_to_path(url)
-        folder = os.path.dirname(path)
-        if not os.path.exists(folder):
-            os.makedirs(folder)
-
-        mode = ('wb' if self.compress else 'w')
-        # Note: the timespec command requires Py3.6+ (if using 3.X you can
-        # export using isoformat() and import with '%Y-%m-%dT%H:%M:%S.%f'
-        result['expires'] = (datetime.utcnow() + self.expires).isoformat(timespec='seconds')
-        with open(path, mode) as fp:
-            if self.compress:
-                data = bytes(json.dump(result), self.encoding)
-                fp.write(zlib.compress(data))
-            else:
-                json.dump(result, fp)
-                      
-
-
-
-
+%time link_crawler('http://example.webscraping.com/', '/(index|view)', cache=DiskCache())
     
-
 
