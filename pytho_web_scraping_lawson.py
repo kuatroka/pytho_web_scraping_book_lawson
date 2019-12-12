@@ -1575,5 +1575,302 @@ from advanced_link_crawler import link_crawler
 
 
 %time link_crawler('http://example.webscraping.com/', '/(index|view)', cache=DiskCache())
+## %time - checks how long does it take to run a piece of code
     
+
+##########################################################################################
+#### cache with Redis instead of DiskCache
+#### for redis db, first we need to use Docker to download if, then...
+#### docker run --name my-redis -p 6379:6379 redis  # here we start download redis image and name it "my-redis" 
+#### and start it on the ports above. By default it had disk persistance on, but I don't know yet where is the data
+#### to start it again use - docker start my-redis
+#### to enter the docker's bash and start poking around - docker exec -i -t my-redis bash
+#### to start talking to redis db - redis-cli
+
+
+import redis
+import json
+
+r = redis.StrictRedis(host='localhost', port=6379, db=0)
+r.set('test', 'answer')
+r.get('test')
+
+url = 'http://example.webscraping.com/places/default/view/United-Kingdom-239'
+html = '...'
+results = {'html': html, 'code': 200} # redis doesn't take dictionaries as is, only straight key > value pairs
+results = json.dumps(results) # we need to use json.dumps to makes the dict into json formated string 
+                              ### this way we can load dictionaries into redis
+
+r.set(url, results)
+
+r.get(url)
+
+## to update results
+r.set(url, json.dumps({'html': 'new html!', 'code': 200}))
+r.get(url)
+
+json.loads(r.get(url))  # json.loads - deserializes bytes, str, bytearray with json object to Python object
+
+## check the keys is in our storage
+r.keys()
+## delete what is no needed
+r.delete('test', 'mykey', 'name')
+
+## delete all the data
+r.flushdb()
+r.keys()
+##
+r.get('http://example.webscraping.com/')
+
+r.get('http://example.python-scraping.com/places/default/edit/Iran-100')
+json.loads(r.get('http://example.webscraping.com/'))
+
+json.loads(record.decode(self.encoding))
+
+####################################################################################
+### RedisCache   !!! the code below doesn't work. Something is wrong with coding/decoding - use file 
+### working_with_redis.py
+
+# import json
+# from datetime import timedelta
+# from redis import StrictRedis
+# import zlib
+
+# class RedisCache:
+#     def __init__(self, client=None, expires=timedelta(days=30),
+#                 encoding='utf-8', compress=True):
+
+#         """ RedisCache helps store urls and their responses to Redis
+#             Initialization components:
+#                 client: a Redis client connected to the key-value database for
+#                     the webcrawling cache (if not set, a localhost:6379
+#                     default connection is used).
+#                 expires (datetime.timedelta): timedelta when content will expire
+#                     (default: 30 days ago)
+#                 encoding (str): character encoding for serialization
+#                 compress (bool): boolean indicating whether compression with zlib should be used
+#         """
+#         self.client = (StrictRedis(host='localhost', port=6379, db=0) if client is None else client)
+#         self.expires = expires
+#         self.encoding = encoding
+#         self.compress = compress
+
+
+
+
+#     def __getitem__(self, url):
+#         """Load value from Redis for the given URL"""
+#         record = self.client.get(url)
+#         if record:
+#             if self.compress:
+#                 record = zlib.decompress(record)
+
+#             return json.loads(record.decode(self.encoding))
+#         else:
+#             raise KeyError(url + ' does not exist')
+
+#     def __setitem__(self, url, result):
+#         """Save value in Redis for the given URL"""
+#         data = bytes(json.dumps(results), self.encoding)
+#         if self.compress:
+#             data = zlib.compress(data)
+#         self.client.setex(url, self.expires, data)     
+
+
+# ## test link_crawler with RedisCache
+
+# from downloader import Downloader
+# from rediscache import RedisCache
+# from advanced_link_crawler import link_crawler
+
+
+# %time link_crawler('http://example.webscraping.com/', '/(index|view)', cache=RedisCache(compress=False))
+# ## %time - checks how long does it take to run a piece of code
+    
+
+### Redis' expiration functionality
+cache = RedisCache(expires=timedelta(seconds=30))
+cache['test'] = {'html': '...', 'code': 200}
+cache['test'] # the record disappears after 20 seconds
+
+#########################################################################################
+### using requests_cache
+
+import requests_cache
+requests_cache.install_cache(backend='redis')
+requests_cache.clear()
+
+url = 'http://example.webscraping.com/view/United-Kingdom-239'
+resp = requests.get(url)
+resp.from_cache # False
+
+resp = requests.get(url)
+resp.from_cache # 2nd time - True
+
+
+
+#### new link_crawler  and downloader that use  requests_cache
+##############################################################
+
+### downloader
+from random import choice
+import requests
+import requests_cache
+
+from throttle import Throttle
+
+
+class Downloader:
+    """ Downloader class to use cache and requests for downloading pages.
+        For contructor, pass:
+            delay (int): # of secs delay between requests (default: 5)
+            user_agent (str): user agent string (default: 'wswp')
+            proxies (list[dict]): list of possible proxies, each
+                must be a dict with http / https keys and proxy values
+            timeout (float/int): number of seconds to wait until timeout
+    """
+    def __init__(self, delay=5, user_agent='wswp', proxies=None,
+                 timeout=60):
+        self.throttle = Throttle(delay)
+        self.user_agent = user_agent
+        self.proxies = proxies
+        self.num_retries = None  # we will set this per request
+        self.timeout = timeout
+
+    def __call__(self, url, num_retries=2):
+        """ Call the downloader class, which will return HTML from cache
+            or download it
+            args:
+                url (str): url to download
+            kwargs:
+                num_retries (int): # times to retry if 5xx code (default: 2)
+        """
+        self.num_retries = num_retries
+        proxies = choice(self.proxies) if self.proxies else None
+        headers = {'User-Agent': self.user_agent}
+        result = self.download(url, headers, proxies)
+        return result['html']
+
+    def make_throttle_hook(self, throttle=None):
+        """
+        Modified from: https://requests-cache.readthedocs.io/en/latest/user_guide.html
+        Returns a response hook function which sleeps for `timeout` seconds if
+        response is not cached
+        """
+        def hook(response, *args, **kwargs):
+            """ see requests hook documentation for more information"""
+            if not getattr(response, 'from_cache', False):
+                throttle.wait(response.url)
+                print('Downloading:', response.url)
+            else:
+                print('Returning from cache:', response.url)
+            return response
+        return hook
+
+    def download(self, url, headers, proxies):
+        """ Download a and return the page content
+            args:
+                url (str): URL
+                headers (dict): dict of headers (like user_agent)
+                proxies (dict): proxy dict w/ keys 'http'/'https', values
+                    are strs (i.e. 'http(s)://IP') (default: None)
+        """
+        session = requests_cache.CachedSession()
+        session.hooks = {'response': self.make_throttle_hook(self.throttle)}
+
+        try:
+            resp = session.get(url, headers=headers, proxies=proxies,
+                               timeout=self.timeout)
+            html = resp.text
+            if resp.status_code >= 400:
+                print('Download error:', resp.text)
+                html = None
+                if self.num_retries and 500 <= resp.status_code < 600:
+                    # recursively retry 5xx HTTP errors
+                    self.num_retries -= 1
+                    return self.download(url, headers, proxies)
+        except requests.exceptions.RequestException as e:
+            print('Download error:', e)
+            return {'html': None, 'code': 500}
+        return {'html': html, 'code': resp.status_code}
+
+
+
+import re
+from urllib import robotparser
+from urllib.parse import urljoin
+from datetime import timedelta
+
+
+import requests_cache
+
+
+def get_robots_parser(robots_url):
+    " Return the robots parser object using the robots_url "
+    rp = robotparser.RobotFileParser()
+    rp.set_url(robots_url)
+    rp.read()
+    return rp
+
+
+def get_links(html):
+    " Return a list of links (using simple regex matching) from the html content "
+    # a regular expression to extract all links from the webpage
+    webpage_regex = re.compile("""<a[^>]+href=["'](.*?)["']""", re.IGNORECASE)
+    # list of all links from the webpage
+    return webpage_regex.findall(html)
+
+
+def link_crawler(start_url, link_regex, robots_url=None, user_agent='wswp',
+                 proxies=None, delay=3, max_depth=4, num_retries=2, expires=timedelta(days=30)):
+    """ Crawl from the given start URL following links matched by link_regex. In the current
+        implementation, we do not actually scrapy any information.
+
+        args:
+            start_url (str): web site to start crawl
+            link_regex (str): regex to match for links
+        kwargs:
+            robots_url (str): url of the site's robots.txt (default: start_url + /robots.txt)
+            user_agent (str): user agent (default: wswp)
+            proxies (list of dicts): a list of possible dicts for http / https proxies
+                For formatting, see the requests library
+            delay (int): seconds to throttle between requests to one domain (default: 3)
+            max_depth (int): maximum crawl depth (to avoid traps) (default: 4)
+            num_retries (int): # of retries when 5xx error (default: 2)
+            expires (timedelta): timedelta for cache expirations (default: 30 days)
+    """
+    crawl_queue = [start_url]
+    # keep track which URL's have seen before
+    seen = {}
+    requests_cache.install_cache(backend='redis', expire_after=expires)
+    if not robots_url:
+        robots_url = '{}/robots.txt'.format(start_url)
+    rp = get_robots_parser(robots_url)
+    D = Downloader(delay=delay, user_agent=user_agent, proxies=proxies)
+    while crawl_queue:
+        url = crawl_queue.pop()
+        # check url passes robots.txt restrictions
+        if rp.can_fetch(user_agent, url):
+            depth = seen.get(url, 0)
+            if depth == max_depth:
+                print('Skipping %s due to depth' % url)
+                continue
+            html = D(url, num_retries=num_retries)
+            if not html:
+                continue
+            # TODO: add actual data scraping here
+            # filter for links matching our regular expression
+            for link in get_links(html):
+                if re.match(link_regex, link):
+                    abs_link = urljoin(start_url, link)
+                    if abs_link not in seen:
+                        seen[abs_link] = depth + 1
+                        crawl_queue.append(abs_link)
+        else:
+            print('Blocked by robots.txt:', url)
+
+%time link_crawler('http://example.webscraping.com/', '/(index|view)')
+
+
+
 

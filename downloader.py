@@ -1,5 +1,6 @@
 from random import choice
 import requests
+import json
 
 from throttle import Throttle
 
@@ -74,3 +75,4 @@ class Downloader:
             print('Download error:', e)
             return {'html': None, 'code': 500}
         return {'html': html, 'code': resp.status_code}
+
