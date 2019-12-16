@@ -1871,6 +1871,23 @@ def link_crawler(start_url, link_regex, robots_url=None, user_agent='wswp',
 
 %time link_crawler('http://example.webscraping.com/', '/(index|view)')
 
+##################################################################################
+### Concurrent Downloading
+
+##  Read Alexa zip file with top 1 mil sites and interate through it without downloading it 
+
+import csv
+from zipfile import ZipFile
+from io import TextIOWrapper, BytesIO
+import requests
+
+resp = requests.get('http://s3.amazonaws.com/alexa-static/top-1m.csv.zip', stream=True)
+urls = [] # top 1 million URLs will be storesd in this list
+with ZipFile(BytesIO(resp.content)) as zf:
+    csv_file = zf.namelist()[0]
+    with zf.open(csv_file) as csv_file:
+        for _, website in csv.reader(TextIOWrapper(csv_file)):
+            urls.append('http://'+ website)
 
 
 
